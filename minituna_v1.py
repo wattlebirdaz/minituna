@@ -12,12 +12,14 @@ from typing import Optional
 TrialStateType = Literal["running", "completed", "failed"]
 
 
+# Trialのストレージ上での表現
+# suggest_uniform() のようなパラメーターをサンプルするAPIを提供せず、
 class FrozenTrial:
     def __init__(self, trial_id: int, state: TrialStateType) -> None:
-        self.trial_id = trial_id
-        self.state = state
-        self.value: Optional[float] = None
-        self.params: Dict[str, float] = {}
+        self.trial_id = trial_id  # identifier
+        self.state = state        # 目的関数の実行状態: Running, Complete, Failed
+        self.value: Optional[float] = None  # 評価値
+        self.params: Dict[str, float] = {}  # サンプルされたパラメーター  {"x": 2.2, "y": 8.0}
 
     @property
     def is_finished(self) -> bool:
@@ -43,16 +45,19 @@ class Storage:
         return copy.deepcopy(best_trial)
 
     def set_trial_value(self, trial_id: int, value: float) -> None:
+        # 評価値を設定するメソッド
         trial = self.trials[trial_id]
         assert not trial.is_finished, "cannot update finished trials"
         trial.value = value
 
     def set_trial_state(self, trial_id: int, state: TrialStateType) -> None:
+        # 状態を更新するメソッド
         trial = self.trials[trial_id]
         assert not trial.is_finished, "cannot update finished trials"
         trial.state = state
 
     def set_trial_param(self, trial_id: int, name: str, value: float) -> None:
+        # パラメーター name は Trial trial_id において、値 value がサンプルされました。
         trial = self.trials[trial_id]
         assert not trial.is_finished, "cannot update finished trials"
         trial.params[name] = value
@@ -78,6 +83,26 @@ class Sampler:
     def __init__(self, seed: int = None) -> None:
         self.rng = random.Random(seed)
 
+    def infer_relative_search_space(
+        self, study: "optuna.Study", trial: "optuna.trial.FrozenTrial"
+    ) -> Dict[str, BaseDistribution]:
+        # 目的関数の評価が終わったらTrialの一覧をとってくる
+        completed_trials = study.storage.get_all_trials(state="Complete")
+        intersection = set(completed_trials[0])  # ("x", "y")
+        for trial in completed_trials:
+            # trial.distributions {"x": Uniform..., "y": Categorical...}
+            intersection.intersection(set(trial.distributions))
+
+        return intersection  # {"x": ..., "y": ...}
+
+    def sample_relative(
+        self,
+        study: "Study",
+        trial: FrozenTrial,
+        search_space: Dict[str, BaseDistribution],
+    ):
+        return {"x": 0.5, "y": 8.0}
+
     def sample_independent(
         self,
         study: "Study",
@@ -85,7 +110,7 @@ class Sampler:
         name: str,
         distribution: Dict[str, float],
     ) -> float:
-        return self.rng.uniform(distribution["low"], distribution["high"])
+        ...
 
 
 class Study:
@@ -96,7 +121,7 @@ class Study:
     def optimize(self, objective: Callable[[Trial], float], n_trials: int) -> None:
         for _ in range(n_trials):
             trial_id = self.storage.create_new_trial()
-            trial = Trial(self, trial_id)
+            trial = Trial(self, trial_id)  # Trial(Study, trial_id) - studyにはstorageとsamplerがある。
 
             try:
                 value = objective(trial)

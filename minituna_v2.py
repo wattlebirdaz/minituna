@@ -77,9 +77,17 @@ class FrozenTrial:
     def __init__(self, trial_id: int, state: TrialStateType) -> None:
         self.trial_id = trial_id
         self.state = state
-        self.value: Optional[float] = None
-        self.internal_params: Dict[str, float] = {}
-        self.distributions: Dict[str, BaseDistribution] = {}
+        self.value: Optional[float] = None  # 評価値
+        self.internal_params: Dict[str, float] = {}  # 実際にサンプルされたパラメーターの値
+        self.distributions: Dict[str, BaseDistribution] = {}  # パラメーターはどういう分布でしたか
+        # distributions = {
+        #     "x": UniformDistribution(0.0, 10.0),
+        #     "y": UniformDistribution(0.0, 10.0),
+        # }
+        # distributions = {
+        #     "classifier": CategoricalDistribution(["svc", "randomforest"]),
+        #     "x": UniformDistribution(0.0, 10.0),
+        # }
 
     @property
     def is_finished(self) -> bool:
