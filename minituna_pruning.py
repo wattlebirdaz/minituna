@@ -2,6 +2,7 @@ import abc
 import copy
 import math
 import random
+import numpy as np
 
 from typing import Any
 from typing import Callable
@@ -12,8 +13,12 @@ from typing import Literal
 from typing import Optional
 from typing import Union
 
-TrialStateType = Literal["running", "completed", "failed"]
+TrialStateType = Literal["running", "completed", "pruned", "failed"]
 CategoricalChoiceType = Union[None, bool, int, float, str]
+
+
+class TrialPruned(Exception):
+    ...
 
 
 class BaseDistribution(abc.ABC):
@@ -26,10 +31,11 @@ class BaseDistribution(abc.ABC):
         ...
 
 
-class UniformDistribution(BaseDistribution):
-    def __init__(self, low: float, high: float) -> None:
+class FloatDistribution(BaseDistribution):
+    def __init__(self, low: float, high: float, log: bool) -> None:
         self.low = low
         self.high = high
+        self.log = log
 
     def to_internal_repr(self, external_repr: Any) -> float:
         return external_repr
@@ -38,19 +44,7 @@ class UniformDistribution(BaseDistribution):
         return internal_repr
 
 
-class LogUniformDistribution(BaseDistribution):
-    def __init__(self, low: float, high: float) -> None:
-        self.low = low
-        self.high = high
-
-    def to_internal_repr(self, external_repr: Any) -> float:
-        return external_repr
-
-    def to_external_repr(self, internal_repr: float) -> Any:
-        return internal_repr
-
-
-class IntUniformDistribution(BaseDistribution):
+class IntDistribution(BaseDistribution):
     def __init__(self, low: int, high: int) -> None:
         self.low = low
         self.high = high
@@ -78,6 +72,7 @@ class FrozenTrial:
         self.trial_id = trial_id
         self.state = state
         self.value: Optional[float] = None
+        self.intermediate_values: Dict[int, float] = {}
         self.internal_params: Dict[str, float] = {}
         self.distributions: Dict[str, BaseDistribution] = {}
 
@@ -94,6 +89,13 @@ class FrozenTrial:
             external_repr[param_name] = distribution.to_external_repr(internal_repr)
         return external_repr
 
+    @property
+    def last_step(self) -> Optional[int]:
+        if len(self.intermediate_values) == 0:
+            return None
+        else:
+            return max(self.intermediate_values.keys())
+
 
 class Storage:
     def __init__(self) -> None:
@@ -104,6 +106,9 @@ class Storage:
         trial = FrozenTrial(trial_id=trial_id, state="running")
         self.trials.append(trial)
         return trial_id
+
+    def get_all_trials(self) -> List[FrozenTrial]:
+        return copy.deepcopy(self.trials)
 
     def get_trial(self, trial_id: int) -> FrozenTrial:
         return copy.deepcopy(self.trials[trial_id])
@@ -131,6 +136,13 @@ class Storage:
         trial.distributions[name] = distribution
         trial.internal_params[name] = value
 
+    def set_trial_intermediate_value(
+        self, trial_id: int, step: int, value: float
+    ) -> None:
+        trial = self.trials[trial_id]
+        assert not trial.is_finished, "cannot update finished trials"
+        trial.intermediate_values[step] = value
+
 
 class Trial:
     def __init__(self, study: "Study", trial_id: int):
@@ -151,23 +163,27 @@ class Trial:
         )
         return param_value
 
-    def suggest_uniform(self, name: str, low: float, high: float) -> float:
-        return self._suggest(name, UniformDistribution(low=low, high=high))
-
-    def suggest_loguniform(self, name: str, low: float, high: float) -> float:
-        return self._suggest(name, LogUniformDistribution(low=low, high=high))
+    def suggest_float(self, name: str, low: float, high: float, log: bool = False) -> float:
+        return self._suggest(name, FloatDistribution(low=low, high=high, log=log))
 
     def suggest_int(self, name: str, low: int, high: int) -> int:
-        return self._suggest(name, IntUniformDistribution(low=low, high=high))
+        return self._suggest(name, IntDistribution(low=low, high=high))
 
     def suggest_categorical(
         self, name: str, choices: List[CategoricalChoiceType]
     ) -> CategoricalChoiceType:
         return self._suggest(name, CategoricalDistribution(choices=choices))
 
+    def report(self, value: float, step: int) -> None:
+        self.study.storage.set_trial_intermediate_value(self.trial_id, step, value)
+
+    def should_prune(self) -> bool:
+        trial = self.study.storage.get_trial(self.trial_id)
+        return self.study.pruner.prune(self.study, trial)
+
 
 class Sampler:
-    def __init__(self, seed: int = None) -> None:
+    def __init__(self, seed: int = None):
         self.rng = random.Random(seed)
 
     def sample_independent(
@@ -177,13 +193,14 @@ class Sampler:
         name: str,
         distribution: BaseDistribution,
     ) -> Any:
-        if isinstance(distribution, UniformDistribution):
-            return self.rng.uniform(distribution.low, distribution.high)
-        elif isinstance(distribution, LogUniformDistribution):
-            log_low = math.log(distribution.low)
-            log_high = math.log(distribution.high)
-            return math.exp(self.rng.uniform(log_low, log_high))
-        elif isinstance(distribution, IntUniformDistribution):
+        if isinstance(distribution, FloatDistribution):
+            if distribution.log:
+                log_low = math.log(distribution.low)
+                log_high = math.log(distribution.high)
+                return math.exp(self.rng.uniform(log_low, log_high))
+            else:
+                return self.rng.uniform(distribution.low, distribution.high)
+        elif isinstance(distribution, IntDistribution):
             return self.rng.randint(distribution.low, distribution.high)
         elif isinstance(distribution, CategoricalDistribution):
             index = self.rng.randint(0, len(distribution.choices) - 1)
@@ -192,10 +209,37 @@ class Sampler:
             raise ValueError("unsupported distribution")
 
 
+class Pruner:
+    def __init__(self, n_startup_trials: int = 5, n_warmup_steps: int = 0) -> None:
+        self.n_startup_trials = n_startup_trials
+        self.n_warmup_steps = n_warmup_steps
+
+    def prune(self, study: "Study", trial: FrozenTrial) -> bool:
+        all_trials = study.storage.get_all_trials()
+        n_trials = len([t for t in all_trials if t.state == "completed"])
+
+        if n_trials < self.n_startup_trials:
+            return False
+
+        last_step = trial.last_step
+        if last_step is None or last_step < self.n_warmup_steps:
+            return False
+
+        # Median pruning
+        others = [
+            t.intermediate_values[last_step]
+            for t in all_trials
+            if last_step in t.intermediate_values
+        ]
+        median = np.nanmedian(np.array(others))
+        return trial.intermediate_values[last_step] > median
+
+
 class Study:
-    def __init__(self, storage: Storage, sampler: Sampler) -> None:
+    def __init__(self, storage: Storage, sampler: Sampler, pruner: Pruner) -> None:
         self.storage = storage
         self.sampler = sampler
+        self.pruner = pruner
 
     def optimize(self, objective: Callable[[Trial], float], n_trials: int) -> None:
         for _ in range(n_trials):
@@ -207,6 +251,17 @@ class Study:
                 self.storage.set_trial_value(trial_id, value)
                 self.storage.set_trial_state(trial_id, "completed")
                 print(f"trial_id={trial_id} is completed with value={value}")
+            except TrialPruned:
+                frozen_trial = self.storage.get_trial(trial_id)
+                last_step = frozen_trial.last_step
+                assert last_step is not None
+                value = frozen_trial.intermediate_values[last_step]
+
+                self.storage.set_trial_value(trial_id, value)
+                self.storage.set_trial_state(trial_id, "pruned")
+                print(
+                    f"trial_id={trial_id} is pruned at step={last_step} value={value}"
+                )
             except Exception as e:
                 self.storage.set_trial_state(trial_id, "failed")
                 print(f"trial_id={trial_id} is failed by {e}")
@@ -219,8 +274,10 @@ class Study:
 def create_study(
     storage: Optional[Storage] = None,
     sampler: Optional[Sampler] = None,
+    pruner: Optional[Pruner] = None,
 ) -> Study:
     return Study(
         storage=storage or Storage(),
         sampler=sampler or Sampler(),
+        pruner=pruner or Pruner(),
     )

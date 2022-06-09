@@ -1,6 +1,6 @@
 # type: ignore
 
-import minituna_v3 as minituna
+import minituna_pruning as minituna
 
 from sklearn.datasets import fetch_openml
 from sklearn.model_selection import train_test_split
