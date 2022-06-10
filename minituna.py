@@ -102,15 +102,12 @@ class Storage:
         best_trial = min(completed_trials, key=lambda t: cast(float, t.value))
         return copy.deepcopy(best_trial)
 
-    def set_trial_value(self, trial_id: int, value: float) -> None:
-        trial = self.trials[trial_id]
-        assert not trial.is_finished, "cannot update finished trials"
-        trial.value = value
-
-    def set_trial_state(self, trial_id: int, state: TrialStateType) -> None:
+    def set_trial_state_value(self, trial_id: int, state: TrialStateType, value: Optional[float] = None) -> None:
         trial = self.trials[trial_id]
         assert not trial.is_finished, "cannot update finished trials"
         trial.state = state
+        if value is not None:
+            trial.value = value
 
     def set_trial_param(
         self, trial_id: int, name: str, distribution: BaseDistribution, value: float
@@ -191,11 +188,10 @@ class Study:
 
             try:
                 value = objective(trial)
-                self.storage.set_trial_value(trial_id, value)
-                self.storage.set_trial_state(trial_id, "completed")
+                self.storage.set_trial_state_value(trial_id, "completed", value)
                 print(f"trial_id={trial_id} is completed with value={value}")
             except Exception as e:
-                self.storage.set_trial_state(trial_id, "failed")
+                self.storage.set_trial_state_value(trial_id, "failed")
                 print(f"trial_id={trial_id} is failed by {e}")
 
     @property
