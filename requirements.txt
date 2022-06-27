@@ -1,4 +1,4 @@
 black
 mypy
-
+pandas
 scikit-learn
