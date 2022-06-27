@@ -1,6 +1,7 @@
 import abc
 import copy
 import enum
+import json
 import math
 import random
 import numpy as np
@@ -117,6 +118,12 @@ class Journal:
     def get_data(self) -> Dict[str, Any]:
         return self.data
 
+    def json_serialize(j: "Journal") -> Dict[str, Any]:
+        return {"op": j.get_op().value, "data": j.get_data()}
+
+    def json_deserialize(obj: bytes) -> "Journal":
+        return Journal(obj["op"], obj["data"])
+
 
 class JournalStorage:
     def __init__(self) -> None:
@@ -149,7 +156,7 @@ class JournalStorage:
                 {
                     "trial_id": trial_id,
                     "name": name,
-                    "distribution": distribution,
+                    "distribution": str(distribution),
                     "value": value,
                 },
             )
@@ -165,10 +172,18 @@ class JournalStorage:
             )
         )
 
+    def _write_json_to_file(self, j: Dict[str, Any]) -> None:
+        with open("myfile.json", "a") as f:
+            json.dump(j, f)
+            f.write("\n")
+
     def _sync(self):
         for log in self.logs[self.next_op_id :]:
             op = log.get_op()
             data = log.get_data()
+
+            self._write_json_to_file(Journal.json_serialize(Journal(op, data)))
+
             if op == Operation.CREATE_NEW_TRIAL:
                 trial_id = len(self.trials)
                 trial = FrozenTrial(trial_id=trial_id, state="running")
