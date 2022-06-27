@@ -1,5 +1,6 @@
 import abc
 import copy
+import enum
 import math
 import random
 import numpy as np
@@ -97,6 +98,116 @@ class FrozenTrial:
             return max(self.intermediate_values.keys())
 
 
+class Operation(enum.Enum):
+    CREATE_NEW_TRIAL = 0
+    SET_TRIAL_VALUE = 1
+    SET_TRIAL_STATE = 2
+    SET_TRIAL_PARAM = 3
+    SET_TRIAL_INTERMEDIATE_VALUE = 4
+
+
+class Journal:
+    def __init__(self, op: Operation, data: Dict[str, Any]):
+        self.op = op
+        self.data = data
+
+    def get_op(self) -> Operation:
+        return self.op
+
+    def get_data(self) -> Dict[str, Any]:
+        return self.data
+
+
+class JournalStorage:
+    def __init__(self) -> None:
+        self.logs: List[Journal] = []
+        self.trials: List[FrozenTrial] = []
+        self.last_created_trial_id = -1
+        self.next_op_id = 0
+
+    def create_new_trial(self) -> int:
+        self.logs.append(Journal(Operation.CREATE_NEW_TRIAL, {}))
+        self._sync()
+        return self.last_created_trial_id
+
+    def set_trial_value(self, trial_id: int, value: float) -> None:
+        self.logs.append(
+            Journal(Operation.SET_TRIAL_VALUE, {"trial_id": trial_id, "value": value})
+        )
+
+    def set_trial_state(self, trial_id: int, state: TrialStateType) -> None:
+        self.logs.append(
+            Journal(Operation.SET_TRIAL_STATE, {"trial_id": trial_id, "state": state})
+        )
+
+    def set_trial_param(
+        self, trial_id: int, name: str, distribution: BaseDistribution, value: float
+    ) -> None:
+        self.logs.append(
+            Journal(
+                Operation.SET_TRIAL_PARAM,
+                {
+                    "trial_id": trial_id,
+                    "name": name,
+                    "distribution": distribution,
+                    "value": value,
+                },
+            )
+        )
+
+    def set_trial_intermediate_value(
+        self, trial_id: int, step: int, value: float
+    ) -> None:
+        self.logs.append(
+            Journal(
+                Operation.SET_TRIAL_INTERMEDIATE_VALUE,
+                {"trial_id": trial_id, "step": step, "value": value},
+            )
+        )
+
+    def _sync(self):
+        for log in self.logs[self.next_op_id :]:
+            op = log.get_op()
+            data = log.get_data()
+            if op == Operation.CREATE_NEW_TRIAL:
+                trial_id = len(self.trials)
+                trial = FrozenTrial(trial_id=trial_id, state="running")
+                self.trials.append(trial)
+                self.last_created_trial_id = trial_id
+                continue
+            trial_id = data["trial_id"]
+            trial = self.trials[trial_id]
+            assert not trial.is_finished, "cannot update finished trials"
+            if op == Operation.SET_TRIAL_VALUE:
+                trial.value = data["value"]
+            elif op == Operation.SET_TRIAL_STATE:
+                trial.state = data["state"]
+            elif op == Operation.SET_TRIAL_PARAM:
+                name = data["name"]
+                trial.distributions[name] = data["distribution"]
+                trial.internal_params[name] = data["value"]
+            elif op == Operation.SET_TRIAL_INTERMEDIATE_VALUE:
+                trial.intermediate_values[data["step"]] = data["value"]
+            else:
+                raise RuntimeError
+
+        self.next_op_id = len(self.logs)
+
+    def get_all_trials(self) -> List[FrozenTrial]:
+        self._sync()
+        return copy.deepcopy(self.trials)
+
+    def get_trial(self, trial_id: int) -> FrozenTrial:
+        self._sync()
+        return copy.deepcopy(self.trials[trial_id])
+
+    def get_best_trial(self) -> Optional[FrozenTrial]:
+        self._sync()
+        completed_trials = [t for t in self.trials if t.state == "completed"]
+        best_trial = min(completed_trials, key=lambda t: cast(float, t.value))
+        return copy.deepcopy(best_trial)
+
+
 class Storage:
     def __init__(self) -> None:
         self.trials: List[FrozenTrial] = []
@@ -163,7 +274,9 @@ class Trial:
         )
         return param_value
 
-    def suggest_float(self, name: str, low: float, high: float, log: bool = False) -> float:
+    def suggest_float(
+        self, name: str, low: float, high: float, log: bool = False
+    ) -> float:
         return self._suggest(name, FloatDistribution(low=low, high=high, log=log))
 
     def suggest_int(self, name: str, low: int, high: int) -> int:
@@ -277,7 +390,7 @@ def create_study(
     pruner: Optional[Pruner] = None,
 ) -> Study:
     return Study(
-        storage=storage or Storage(),
+        storage=storage or JournalStorage(),
         sampler=sampler or Sampler(),
         pruner=pruner or Pruner(),
     )
